@@ -17,7 +17,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_fetch, rate_limited_json, get_headers
+from .base import rate_limited_fetch, rate_limited_json, get_headers, filter_available_listings
 
 logger = logging.getLogger("house-finder.scrapers.immoweb")
 
@@ -330,5 +330,6 @@ async def scrape_immoweb(
             logger.warning(f"[Immoweb] Failed to fetch page {page}")
             break
 
+    all_results = await filter_available_listings(session, all_results)
     logger.info(f"[Immoweb] Found {len(all_results)} results")
     return all_results

@@ -17,7 +17,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_fetch
+from .base import rate_limited_fetch, is_listing_unavailable
 
 logger = logging.getLogger("house-finder.scrapers.jamar")
 
@@ -55,6 +55,10 @@ def _parse_overview(html: str, criteria: SearchCriteria) -> list[dict]:
     matched = []
     for card in cards:
         try:
+            # Skip sold/unavailable listings
+            if is_listing_unavailable(card):
+                continue
+
             link_el = card.select_one("a[href]")
             if not link_el:
                 continue
@@ -131,6 +135,9 @@ def _parse_detail(html: str, stub: dict) -> Optional[PropertyResult]:
     """Parse a detail page and merge with stub from overview."""
     try:
         soup = BeautifulSoup(html, "lxml")
+
+        if is_listing_unavailable(soup):
+            return None
 
         # Address from <h2><a href="...maps...">Den Haaglaan 121, 2660 Hoboken</a></h2>
         street = None
@@ -280,22 +287,12 @@ async def scrape_jamar(
     results = []
     for stub, detail_html in zip(stubs, detail_htmls):
         if isinstance(detail_html, Exception) or not detail_html:
-            results.append(PropertyResult(
-                title=stub["title"],
-                price=stub["price"],
-                price_text=stub["price_text"],
-                location=stub["location"],
-                postcode=stub["postcode"],
-                link=stub["link"],
-                source="Jamar",
-                bedrooms=stub["bedrooms"],
-                image_url=stub.get("image_url"),
-                property_type=stub.get("property_type"),
-            ))
-        else:
-            result = _parse_detail(detail_html, stub)
-            if result:
-                results.append(result)
+            # 404 or fetch error — listing is unavailable, skip it
+            logger.debug(f"[Jamar] Skipping unavailable listing: {stub.get('link')}")
+            continue
+        result = _parse_detail(detail_html, stub)
+        if result:
+            results.append(result)
 
     logger.info(f"[Jamar] Returning {len(results)} results")
     return results

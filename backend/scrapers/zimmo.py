@@ -15,7 +15,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_fetch, rate_limited_json, get_headers
+from .base import rate_limited_fetch, rate_limited_json, get_headers, filter_available_listings
 
 logger = logging.getLogger("house-finder.scrapers.zimmo")
 
@@ -329,5 +329,6 @@ async def scrape_zimmo(
         if not got_any:
             break
 
+    all_results = await filter_available_listings(session, all_results)
     logger.info(f"[Zimmo] Found {len(all_results)} results")
     return all_results

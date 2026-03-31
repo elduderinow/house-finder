@@ -208,3 +208,27 @@ def drop_stale_listings():
     with _connect() as conn:
         conn.execute("DELETE FROM listings WHERE last_seen < ?", (cutoff,))
         conn.commit()
+
+
+def remove_gone_listings(sources: list[str], postcodes: list[str], current_links: set[str]) -> int:
+    """
+    Delete DB listings for the given sources+postcodes that were not returned
+    by the latest scrape — i.e. sold, removed, or otherwise unavailable.
+    Only runs when current_links is non-empty to avoid wiping the cache on a failed scrape.
+    Returns the number of deleted rows.
+    """
+    if not sources or not postcodes or not current_links:
+        return 0
+    src_ph = ",".join("?" * len(sources))
+    pc_ph = ",".join("?" * len(postcodes))
+    link_ph = ",".join("?" * len(current_links))
+    with _connect() as conn:
+        result = conn.execute(
+            f"""DELETE FROM listings
+                WHERE source IN ({src_ph})
+                AND postcode IN ({pc_ph})
+                AND link NOT IN ({link_ph})""",
+            list(sources) + list(postcodes) + list(current_links),
+        )
+        conn.commit()
+        return result.rowcount

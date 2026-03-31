@@ -15,7 +15,7 @@ Check off once a scraper is implemented and working.
 
 ## Medium (Antwerp-based)
 
-- [ ] [Jamar Immo](https://jamar.immo) — growing fast, Antwerp city (Vleminckveld)
+- [x] [Jamar Immo](https://jamar.immo) — growing fast, Antwerp city (Vleminckveld)
 - [ ] [Coprimmo](https://coprimmo.be/nl) — offices in Berchem, Aartselaar, Kontich, Mortsel
 - [ ] [Walls Vastgoed](https://www.walls.be) — Antwerp centrum + Linkeroever (2050), 20+ years
 - [ ] [Immodome](https://www.immodome.be) — 6 offices, specialises in character properties

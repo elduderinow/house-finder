@@ -10,7 +10,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_fetch
+from .base import rate_limited_fetch, is_listing_unavailable, filter_available_listings
 
 logger = logging.getLogger("house-finder.scrapers.era")
 
@@ -118,6 +118,8 @@ def _parse_html(html: str) -> list[PropertyResult]:
 
     for card in cards:
         try:
+            if is_listing_unavailable(card):
+                continue
             about = card.get("about", "")
             link = f"https://www.era.be{about}" if about else ""
 
@@ -231,5 +233,6 @@ async def scrape_era(
                 logger.warning(f"[ERA] Failed to fetch {city} page {page}")
                 break
 
+    all_results = await filter_available_listings(session, all_results)
     logger.info(f"[ERA] Found {len(all_results)} results")
     return all_results

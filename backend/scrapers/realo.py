@@ -12,7 +12,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_fetch, get_headers
+from .base import rate_limited_fetch, get_headers, filter_available_listings
 
 logger = logging.getLogger("house-finder.scrapers.realo")
 
@@ -365,5 +365,6 @@ async def scrape_realo(
         if not got_any:
             break
 
+    all_results = await filter_available_listings(session, all_results)
     logger.info(f"[Realo] Found {len(all_results)} results")
     return all_results

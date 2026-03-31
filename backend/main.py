@@ -19,6 +19,7 @@ from .models import SearchCriteria, PropertyResult
 from .db import (
     init_db, get_all_interests, set_interest,
     upsert_listings, query_listings, get_cache_age, drop_stale_listings,
+    remove_gone_listings,
 )
 from .scrapers.immoweb import scrape_immoweb
 from .scrapers.zimmo import scrape_zimmo
@@ -182,6 +183,27 @@ def _db_rows_to_results(rows: list[dict]) -> list[PropertyResult]:
     return results
 
 
+def _cleanup_gone_listings(
+    filtered: list[PropertyResult],
+    criteria: SearchCriteria,
+    log_prefix: str = "",
+) -> None:
+    """
+    Remove DB listings per source, but only for sources that actually returned
+    results. A source that returned 0 (e.g. fetch error) is skipped entirely —
+    we never wipe a source's cache just because its scraper failed.
+    """
+    by_source: dict[str, set[str]] = {}
+    for r in filtered:
+        if r.link and r.source:
+            by_source.setdefault(r.source, set()).add(r.link)
+
+    for source, links in by_source.items():
+        removed = remove_gone_listings([source], criteria.postcodes, links)
+        if removed:
+            logger.info(f"{log_prefix} Removed {removed} gone {source} listings from DB.")
+
+
 async def _background_scrape(scrape_id: str, criteria: SearchCriteria, existing_links: set[str]):
     try:
         raw, _ = await _run_scrapers(criteria)
@@ -191,6 +213,7 @@ async def _background_scrape(scrape_id: str, criteria: SearchCriteria, existing_
             if not r.listed_date:
                 r.listed_date = today
         upsert_listings(filtered)
+        _cleanup_gone_listings(filtered, criteria, f"[BG:{scrape_id[:8]}]")
         new_count = sum(1 for r in filtered if r.link not in existing_links)
         _active_scrapes[scrape_id] = {"done": True, "new_count": new_count}
         logger.info(f"[BG:{scrape_id[:8]}] Done. {new_count} new listings.")
@@ -261,6 +284,7 @@ async def search(criteria: SearchCriteria, background_tasks: BackgroundTasks):
             r.listed_date = today
         r.first_seen = now_str
     upsert_listings(filtered)
+    _cleanup_gone_listings(filtered, criteria)
 
     sources_count = {}
     for r in filtered:

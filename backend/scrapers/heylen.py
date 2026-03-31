@@ -13,7 +13,8 @@ from typing import Optional
 import aiohttp
 
 from ..models import SearchCriteria, PropertyResult
-from .base import rate_limited_json, get_headers
+from bs4 import BeautifulSoup
+from .base import rate_limited_json, get_headers, is_listing_unavailable
 
 logger = logging.getLogger("house-finder.scrapers.heylen")
 
@@ -42,13 +43,25 @@ WEBID_TO_LABEL = {
 }
 
 
-async def _fetch_detail(session: aiohttp.ClientSession, prop_id: int) -> dict:
-    """Fetch image URL, garden_sqm, and living sqm from the detail endpoint."""
+async def _fetch_html(session: aiohttp.ClientSession, url: str) -> str | None:
+    try:
+        async with session.get(
+            url, headers=get_headers(),
+            timeout=aiohttp.ClientTimeout(total=10),
+            allow_redirects=True,
+        ) as resp:
+            if resp.status == 200:
+                return await resp.text()
+    except Exception as e:
+        logger.debug(f"[Heylen] HTML fetch failed for {url}: {e}")
+    return None
+
+
+async def _fetch_json_detail(session: aiohttp.ClientSession, prop_id: int) -> dict:
     url = f"https://www.heylenvastgoed.be/api/properties/{prop_id}/detail"
     try:
         async with session.get(
-            url,
-            headers=get_headers(),
+            url, headers={**get_headers(), "Accept": "application/json"},
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status == 200:
@@ -62,26 +75,55 @@ async def _fetch_detail(session: aiohttp.ClientSession, prop_id: int) -> dict:
                 garden_sqm = data.get("SurfaceGarden") or None
                 return {"image_url": image_url, "garden_sqm": int(garden_sqm) if garden_sqm else None}
     except Exception as e:
-        logger.debug(f"[Heylen] Detail fetch failed for {prop_id}: {e}")
+        logger.debug(f"[Heylen] JSON detail fetch failed for {prop_id}: {e}")
     return {}
 
 
-async def _fetch_details_batch(session: aiohttp.ClientSession, prop_ids: list[int]) -> dict[int, dict]:
-    """Fetch details for multiple properties concurrently."""
+async def _fetch_detail(session: aiohttp.ClientSession, prop_id: int, listing_url: str) -> dict | None:
+    """Fetch JSON detail and verify the HTML listing page is available.
+
+    Returns None if the listing is sold or shows a custom 404 page.
+    Returns {} on transient errors (listing kept, extra data missing).
+    """
+    html, detail = await asyncio.gather(
+        _fetch_html(session, listing_url),
+        _fetch_json_detail(session, prop_id),
+    )
+
+    if html is not None:
+        soup = BeautifulSoup(html, "lxml")
+        if is_listing_unavailable(soup):
+            logger.debug(f"[Heylen] Skipping unavailable listing {prop_id} ({listing_url})")
+            return None
+
+    return detail
+
+
+async def _fetch_details_batch(
+    session: aiohttp.ClientSession,
+    items: list[dict],
+) -> dict[int, dict | None]:
+    """Fetch details for multiple properties concurrently.
+    Values are None for unavailable listings, {} for fetch errors, dict for success."""
     results = await asyncio.gather(
-        *[_fetch_detail(session, pid) for pid in prop_ids],
+        *[_fetch_detail(session, item["ID"], item["_listing_url"]) for item in items],
         return_exceptions=True,
     )
     return {
-        pid: detail
-        for pid, detail in zip(prop_ids, results)
-        if isinstance(detail, dict)
+        item["ID"]: (detail if not isinstance(detail, Exception) else {})
+        for item, detail in zip(items, results)
     }
 
 
 def _parse_item(item: dict, detail: Optional[dict] = None) -> Optional[PropertyResult]:
     try:
         detail = detail or {}
+
+        # Skip sold listings based on status name fields
+        status_name = (item.get("StatusName") or item.get("StatusText") or "").lower()
+        if "verkocht" in status_name or "sold" in status_name:
+            return None
+
         prop_id = item.get("ID", "")
         city = item.get("City", "")
         city_slug = city.lower().replace(" ", "-").replace("'", "")
@@ -118,7 +160,9 @@ def _parse_item(item: dict, detail: Optional[dict] = None) -> Optional[PropertyR
         goal = item.get("Goal", 0)
         tx_path = "huren" if goal == 1 else "kopen"
         tx_slug = "te-huur" if goal == 1 else "te-koop"
-        link = f"https://www.heylenvastgoed.be/{tx_path}/{type_label}-{tx_slug}-in-{city_slug}/{prop_id}"
+        link = item.get("_listing_url") or (
+            f"https://www.heylenvastgoed.be/{tx_path}/{type_label}-{tx_slug}-in-{city_slug}/{prop_id}"
+        )
 
         listed_date = None
         created = item.get("CreatedDate", "")
@@ -199,6 +243,10 @@ async def scrape_heylen(
     # Filter items before fetching images
     matched = []
     for item in items:
+        # Skip sold/unavailable: Status 1=available, 2=under option, 3=sold
+        status = item.get("Status")
+        if status is not None and int(status) not in (1, 2):
+            continue
         if postcode_set and str(item.get("Zip", "")) not in postcode_set:
             continue
         price_raw = item.get("Price")
@@ -207,19 +255,34 @@ async def scrape_heylen(
             continue
         if price_max and price and price > price_max:
             continue
+
+        # Pre-compute listing URL (needed for HTML availability check)
+        city = item.get("City", "")
+        city_slug = city.lower().replace(" ", "-").replace("'", "")
+        web_id = str(item.get("WebID", ""))
+        type_label = WEBID_TO_LABEL.get(web_id, "eigendom")
+        goal = item.get("Goal", 0)
+        tx_path = "huren" if goal == 1 else "kopen"
+        tx_slug = "te-huur" if goal == 1 else "te-koop"
+        item["_listing_url"] = (
+            f"https://www.heylenvastgoed.be/{tx_path}"
+            f"/{type_label}-{tx_slug}-in-{city_slug}/{item['ID']}"
+        )
         matched.append(item)
 
-    # Fetch detail (image + garden + sqm) concurrently for matched results only
+    # Fetch detail (image + garden) and verify HTML page concurrently
     if matched:
-        prop_ids = [item["ID"] for item in matched if item.get("ID")]
-        detail_map = await _fetch_details_batch(session, prop_ids)
+        detail_map = await _fetch_details_batch(session, matched)
     else:
         detail_map = {}
 
     results = []
     for item in matched:
         prop_id = item.get("ID")
-        result = _parse_item(item, detail=detail_map.get(prop_id))
+        detail = detail_map.get(prop_id)
+        if detail is None:  # sold or custom 404 page
+            continue
+        result = _parse_item(item, detail=detail)
         if result:
             results.append(result)
 
